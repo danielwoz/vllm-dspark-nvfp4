@@ -1,0 +1,62 @@
+--- a/flashinfer/data/include/flashinfer/attention/sparse_mla_sm120/model/kv_cache_traits.cuh
++++ b/flashinfer/data/include/flashinfer/attention/sparse_mla_sm120/model/kv_cache_traits.cuh
+@@ -80,6 +80,10 @@
+   // V = pure nope (no rope component)
+   static constexpr bool V_HAS_ROPE = false;
+ 
++  // NVFP4 KV storage (this port). false => nope stored full-width fp8.
++  static constexpr bool KV_IS_NVFP4 = false;
++  static constexpr int NOPE_STORAGE_BYTES = D_NOPE;  // gmem bytes for the nope region
++
+   // FP32→UE8M0 scale conversion for block-scaled MMA
+   // FlashMLA stores power-of-2 FP32 scales → bit-shift gives exact UE8M0
+   __device__ static __forceinline__ uint8_t scale_to_ue8m0(float scale) {
+@@ -137,10 +141,37 @@
+   // XV rope: CUDA core scalar FMA from global (zero smem, M5b verified)
+   static constexpr bool V_HAS_ROPE = true;
+ 
++  // NVFP4 KV storage (this port). false => nope stored full-width fp8.
++  static constexpr bool KV_IS_NVFP4 = false;
++  static constexpr int NOPE_STORAGE_BYTES = D_NOPE;  // 448
++
+   // UE8M0 scales are native — no conversion needed
+   __device__ static __forceinline__ uint8_t scale_to_ue8m0(uint8_t scale) { return scale; }
+ };
+ 
++// DSV4 with NVFP4-packed NoPE. Inherits ALL of DSV4's dims, smem layout, scale
++// format (per-64 UE8M0), Q strides, and compute traits — so every downstream
++// MMA/smem access is byte-identical to DSV4. ONLY the gmem storage of the NoPE
++// region differs: 448 E2M1 nibbles packed 2/byte = 224B (vs 448B fp8). On IO
++// load the 224B is expanded via a lossless nibble->fp8-e4m3 LUT into the DSV4
++// 448B fp8 smem buffer; the UE8M0 per-64 scale footer (8B) and bf16 rope (128B)
++// are copied byte-identically. Logical page = 224 + 128 + 8 = 360 B/token.
++template <>
++struct KVCacheTraits<ModelType::DSV4_NVFP4> : KVCacheTraits<ModelType::DSV4> {
++  static constexpr bool KV_IS_NVFP4 = true;
++  static constexpr int NOPE_STORAGE_BYTES = D_NOPE / 2;  // 224 (E2M1, 2 nibbles/byte)
++  // TMA bulk-copies only the packed nope bytes; the consumer expands them to the
++  // full 448B fp8 row in smem (same async protocol as fp8, just fewer tx bytes).
++  static constexpr int KV_SMEM_COPY_BYTES = NOPE_STORAGE_BYTES;  // 224
++  // FlashMLA-style FOOTER, 360 logical bytes/token:
++  //   data slot (IO stride): [0:224) E2M1 nope, [224:352) bf16 rope  = 352B (16B aligned)
++  //   footer: 8B/token (7 UE8M0 per-64 + 1 pad) — identical to DSV4
++  static constexpr int KV_GMEM_STRIDE =
++      NOPE_STORAGE_BYTES + D_ROPE * sizeof(bf16) + SCALE_BYTES_PER_TOKEN;  // 360
++  static constexpr int KV_ROPE_GMEM_OFFSET = NOPE_STORAGE_BYTES;                 // 224
++  static constexpr int KV_SCALE_GMEM_OFFSET = NOPE_STORAGE_BYTES + D_ROPE * sizeof(bf16);  // 352
++};
++
+ // ============================================================================
+ // Shared constants across all model types
+ // ============================================================================
+@@ -156,6 +187,10 @@
+ static_assert(KVCacheTraits<ModelType::DSV3_2>::D_V == D_V);
+ static_assert(KVCacheTraits<ModelType::DSV4>::D_ROPE == D_ROPE);
+ static_assert(KVCacheTraits<ModelType::DSV4>::D_V == D_V);
++static_assert(KVCacheTraits<ModelType::DSV4_NVFP4>::D_ROPE == D_ROPE);
++static_assert(KVCacheTraits<ModelType::DSV4_NVFP4>::D_V == D_V);
++static_assert(KVCacheTraits<ModelType::DSV4_NVFP4>::NOPE_STORAGE_BYTES == 224);
++static_assert(KVCacheTraits<ModelType::DSV4_NVFP4>::KV_GMEM_STRIDE == 360);
+ static_assert(KVCacheTraits<ModelType::GLM_NSA>::D_ROPE == D_ROPE);
+ static_assert(KVCacheTraits<ModelType::GLM_NSA>::D_V == D_V);
+ 

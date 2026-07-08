@@ -1,0 +1,15 @@
+--- a/vllm/models/deepseek_v4/nvidia/dspark.py
++++ b/vllm/models/deepseek_v4/nvidia/dspark.py
+@@ -157,6 +157,12 @@
+             )
+             swa_kv_cache = attn.swa_cache_layer.kv_cache
+             swa_kv_cache_2d = swa_kv_cache.view(swa_kv_cache.shape[0], -1)
++            if swa_kv_cache.shape[-1] == 360:  # nvfp4_ds_mla page
++                from ..nvfp4_store import store_nvfp4_kv
++                store_nvfp4_kv(kv_normed, swa_kv_cache_2d, layer_slot_mapping,
++                               context_positions, attn.rotary_emb.cos_sin_cache,
++                               attn.swa_cache_layer.block_size)
++                continue
+             dummy_q = torch.empty(
+                 (num_ctx, attn.n_local_heads, attn.head_dim),
+                 dtype=kv_normed.dtype,
