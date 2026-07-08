@@ -1,45 +1,46 @@
-# DeepSeek-V4-Flash-Abliterated-DSpark with the true 4-bit NVFP4 KV cache,
-# served by the dspark-vllm fork build (nvfp4 overlay baked into the image),
-# pinned to the two RTX PRO 6000 Blackwell cards (SM120).
+# DeepSeek-V4-Flash-Abliterated-DSpark with the true 4-bit NVFP4 KV cache
+# (vLLM DSpark fork + flashinfer SM120 patches baked into the image).
+#
+# Requires: 2x SM120 GPUs (e.g. RTX PRO 6000 Blackwell), NVIDIA container toolkit.
 #
 # Profile: 1M context window with CUDA graphs (FULL_AND_PIECEWISE, capture 8).
-#   - util 0.95 / capture 8: ~1.63M-token KV pool, 1.55x concurrent 1M sessions,
-#     single-stream decode ~160 tok/s on random tokens (~220+ on real code).
-#   - capture 64 starves KV below the 1M minimum (estimator reserves ~17 GiB/GPU);
-#     capture 8 covers one spec-decode session on the FULL-graph fast path.
-#   - eager fallback (slow decode, 2.41M pool): drop the compilation-config and
-#     max-cudagraph-capture-size lines and add --enforce-eager.
-#   - previous fp8/jasl-fork setup preserved in docker-compose.fp8-jasl.yml.bak.
+# Measured on 2x RTX PRO 6000: ~1.63M-token KV pool (1.55x concurrent 1M sessions),
+# single-stream ITL ~14.5 ms median, TTFT ~0.5 s.
+#   - capture 64 starves KV below the 1M minimum (profiler reserves ~17 GiB/GPU);
+#     capture 8 keeps one speculative-decode session on the FULL-graph fast path.
+#   - eager fallback (slower decode, bigger pool): remove the compilation-config
+#     and max-cudagraph-capture-size lines and add --enforce-eager.
 #
-# Start:  docker compose up -d
-# Logs:   docker compose logs -f
+# Configuration (env vars, all optional):
+#   NVFP4_GPUS       GPUs to use: "all", indices ("0,1"), or UUIDs. Default: all.
+#                    Use UUIDs on mixed-GPU hosts so a non-SM120 card is never picked
+#                    (find them with `nvidia-smi -L`).
+#   NVFP4_TP         tensor-parallel size. Default: 2.
+#   NVFP4_PORT       host port. Default: 8008.
+#   HF_CACHE_DIR     HuggingFace cache holding the model. Default: ~/.cache/huggingface
+#   JIT_CACHE_DIR    persistent Triton/FlashInfer compile cache (local disk
+#                    recommended; avoids first-request compile stalls). Default: ./jit-cache
+#
+# Start:  docker compose up -d      Logs:  docker compose logs -f
+# First start downloads ~155 GB of weights unless already in HF_CACHE_DIR
+# (set HF_HUB_OFFLINE=1 in `environment` once cached to skip network checks).
 services:
   deepseek-v4-nvfp4:
     image: danielwoz/vllm:dspark-nvfp4-cu132-20260708
     container_name: deepseek-v4-nvfp4
     restart: unless-stopped
+    runtime: nvidia
     ipc: host                       # required for vLLM tensor-parallel shared memory
     ports:
-      - "8008:8000"   # host 8008 -> container 8000 (host :8012 forwards here too)
+      - "${NVFP4_PORT:-8008}:8000"
     volumes:
-      # HF cache that already holds the downloaded weights (HF_HOME on the host)
-      - /mnt/cephfs/ai/huggingface:/hf
-      # Persistent JIT cache (Triton/FlashInfer/vLLM compile artifacts) so container
-      # recreates skip first-request compile stalls. Local disk, not CephFS.
-      - /home/danielwoz/dspark-nvfp4-port/jit-cache:/cache/jit
+      - ${HF_CACHE_DIR:-~/.cache/huggingface}:/hf
+      - ${JIT_CACHE_DIR:-./jit-cache}:/cache/jit
     environment:
       HF_HOME: "/hf"
-      HF_HUB_OFFLINE: "1"           # weights are local; don't hit the network on start
-    deploy:
-      resources:
-        reservations:
-          devices:
-            # ONLY the two PRO 6000 (SM120), by UUID so the 3090 is never picked
-            - driver: nvidia
-              device_ids:
-                - "GPU-adcef861-9a92-ca06-d7d8-0db8bb038d2b"
-                - "GPU-c2377861-8cae-e23c-2283-bf39f30975aa"
-              capabilities: [gpu]
+      NVIDIA_VISIBLE_DEVICES: "${NVFP4_GPUS:-all}"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+      CUDA_DEVICE_ORDER: "PCI_BUS_ID"
     entrypoint: ["/opt/venv/bin/python3"]
     command:
       - "-m"
@@ -51,7 +52,7 @@ services:
       - "deepseekv4-flash[1m]"
       - "deepseekv4-flash"
       - "DeepSeek-V4-Flash-Abliterated-DSpark"
-      - "--tensor-parallel-size=2"
+      - "--tensor-parallel-size=${NVFP4_TP:-2}"
       - "--gpu-memory-utilization=0.95"
       - "--max-model-len=1048576"
       - "--max-cudagraph-capture-size=8"
@@ -79,4 +80,4 @@ services:
       interval: 30s
       timeout: 5s
       retries: 40
-      start_period: 1800s           # cold model load over CephFS can take a while
+      start_period: 1800s           # cold model load / first download can take a while
