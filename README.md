@@ -26,21 +26,36 @@ addition).
 
 Identical to the base DSpark image, plus one flag: `--kv-cache-dtype nvfp4_ds_mla`.
 
+The model is a `MODEL` env variable — the image's entrypoint runs
+`vllm serve "$MODEL" "$@"`, so `-e MODEL=…` selects the checkpoint (default: the official
+DeepSeek-V4-Flash-DSpark) and any extra args are forwarded to `vllm serve`.
+
 ```bash
-docker run --gpus '"device=0,1"' --ipc=host -p 8000:8000 \
+docker run --gpus '"device=0,1"' --ipc=host --shm-size 64g -p 8000:8000 \
   -v /path/to/hf-cache:/hf -e HF_HOME=/hf \
+  -e MODEL=deepseek-ai/DeepSeek-V4-Flash-DSpark \
   danielwoz/vllm:dspark-nvfp4-cu132 \
-    nvidia/DeepSeek-V4-Flash-NVFP4 \
     --tensor-parallel-size 2 \
-    --kv-cache-dtype nvfp4_ds_mla \
-    --gpu-memory-utilization 0.96 \
-    --max-model-len 262144
+    --kv-cache-dtype nvfp4_ds_mla --block-size 256 \
+    --max-model-len 1048576 --gpu-memory-utilization 0.95 \
+    --max-cudagraph-capture-size 16 \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":4}' \
+    --kernel-config.moe_backend marlin \
+    --enable-flashinfer-autotune \
+    --trust-remote-code --tokenizer-mode deepseek_v4 \
+    --reasoning-parser deepseek_v4 --enable-auto-tool-choice --tool-call-parser deepseek_v4
 ```
+
+Model variants (change `-e MODEL=…`):
+- **Official (default):** `deepseek-ai/DeepSeek-V4-Flash-DSpark`
+- **Abliterated:** `fraserprice/DeepSeek-V4-Flash-Abliterated-DSpark`
+- **NVIDIA NVFP4 (no DSpark draft):** `nvidia/DeepSeek-V4-Flash-NVFP4` — also drop `--speculative-config`
 
 Notes:
 - **SM120 only** (RTX PRO 6000 Blackwell Workstation/Max-Q; anything that JITs `sparse_mla_sm120`).
-- With DSpark spec-decode + full cudagraphs, use `--gpu-memory-utilization 0.96` (0.90 leaves too
-  little KV headroom after graph capture).
+- `--enable-flashinfer-autotune` is on by default here (kernel autotune at startup; adds boot time,
+  neutral-to-positive on throughput).
+- Tuned config: **spec-4 / cudagraph-capture-16 / marlin MoE** (+~11% decode vs capture-8 in our sweep).
 - `--kv-cache-dtype fp8_ds_mla` and all other base-image behavior is unchanged.
 
 ## What's in the patch series (shipped in the image at `/opt/nvfp4/patches/`)
