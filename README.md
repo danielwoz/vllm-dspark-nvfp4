@@ -33,11 +33,12 @@ DeepSeek-V4-Flash-DSpark) and any extra args are forwarded to `vllm serve`.
 ```bash
 docker run --gpus '"device=0,1"' --ipc=host --shm-size 64g -p 8000:8000 \
   -v /path/to/hf-cache:/hf -e HF_HOME=/hf \
-  -e MODEL=deepseek-ai/DeepSeek-V4-Flash-DSpark \
+  -e MODEL=deepseek-ai/DeepSeek-V4-Flash-0731 \
   danielwoz/vllm:dspark-nvfp4-cu132 \
     --tensor-parallel-size 2 \
     --kv-cache-dtype nvfp4_ds_mla --block-size 256 \
-    --max-model-len 1048576 --gpu-memory-utilization 0.95 \
+    --max-model-len 1048576 --gpu-memory-utilization 0.93 \
+    --max-num-batched-tokens 2048 \
     --max-cudagraph-capture-size 16 \
     --speculative-config '{"method":"dspark","num_speculative_tokens":4}' \
     --kernel-config.moe_backend marlin \
@@ -47,7 +48,8 @@ docker run --gpus '"device=0,1"' --ipc=host --shm-size 64g -p 8000:8000 \
 ```
 
 Model variants (change `-e MODEL=…`):
-- **Official (default):** `deepseek-ai/DeepSeek-V4-Flash-DSpark`
+- **Latest official (recommended):** `deepseek-ai/DeepSeek-V4-Flash-0731`
+- **Official DSpark (image default):** `deepseek-ai/DeepSeek-V4-Flash-DSpark`
 - **Abliterated:** `fraserprice/DeepSeek-V4-Flash-Abliterated-DSpark`
 - **NVIDIA NVFP4 (no DSpark draft):** `nvidia/DeepSeek-V4-Flash-NVFP4` — also drop `--speculative-config`
 
