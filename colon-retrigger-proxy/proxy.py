@@ -31,6 +31,7 @@ Configuration (environment):
 """
 import json
 import os
+from collections import Counter
 
 import aiohttp
 from aiohttp import web
@@ -41,7 +42,42 @@ COLON_RETRIGGER = os.environ.get("COLON_RETRIGGER", "1") == "1"
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "2"))
 CONT_KWARGS = json.loads(os.environ.get("CONT_CHAT_TEMPLATE_KWARGS", '{"thinking": false}'))
 ALIASES = json.loads(os.environ.get("MODEL_ALIASES", "{}"))
+LOOP_DETECT = os.environ.get("LOOP_DETECT", "1") == "1"
+LOOP_MAX_REPEAT = int(os.environ.get("LOOP_MAX_REPEAT", "6"))
 HOP_HEADERS = {"host", "content-length", "transfer-encoding", "connection"}
+
+
+# Rule/box/underline characters: long runs of these are legitimate formatting,
+# not a decode loop, so short-period detection skips pure runs of them.
+_FMT = set("=-_*#~|+. \t\r\n─━═")
+
+
+def _looping(text, k=LOOP_MAX_REPEAT):
+    """True when the tail is a short unit repeated many times (a degenerate
+    decode loop): a repeated phrase/line, or a repeated character. Long units
+    (words, phrases, lines) trigger at k repeats; sub-4-char units need a much
+    higher bar and skip pure formatting runs, to avoid flagging real output."""
+    tail = text[-2000:]
+    if len(tail) < 24:
+        return False
+    maxp = min(128, len(tail) // k)
+    for p in range(1, maxp + 1):
+        unit = tail[-p:]
+        if not unit.strip():
+            continue
+        if p >= 4:
+            need = k
+        else:
+            if all(ch in _FMT for ch in unit):
+                continue
+            need = max(k, 30)
+        if len(tail) >= p * need and tail.endswith(unit * need):
+            return True
+    # Long-unit (period > 128) line loops.
+    lines = [l.strip() for l in tail.splitlines() if len(l.strip()) >= 8]
+    if len(lines) >= k and Counter(lines).most_common(1)[0][1] >= k:
+        return True
+    return False
 
 
 def rewrite(body: bytes) -> bytes:
@@ -89,6 +125,9 @@ async def _pump(sess, body, headers, resp):
     finish = None
     terminals = []
     meta = None
+    last_check = 0
+    rtext = ""
+    last_check_r = 0
     async with sess.request("POST", UPSTREAM + "/v1/chat/completions",
                             data=body, headers=headers) as up:
         async for raw in up.content:
@@ -108,13 +147,34 @@ async def _pump(sess, body, headers, resp):
             content += c
             tool = tool or t
             ch = obj.get("choices") or []
+            delta = ch[0].get("delta") if ch else None
             fr = ch[0].get("finish_reason") if ch else None
             if fr is not None:
                 finish = fr
-            if c or t:
+            rc = (delta.get("reasoning") or delta.get("reasoning_content") or "") if delta else ""
+            # Forward any chunk carrying a delta payload (content, reasoning, tool,
+            # or the opening role); a finish_reason riding on it is suppressed so
+            # the stream stays open and the turn end is emitted once at the close.
+            if delta and (c or t or rc or delta.get("role")):
                 if fr is not None:
                     obj["choices"][0]["finish_reason"] = None
                 await resp.write(_sse(obj))
+                if LOOP_DETECT and c and len(content) - last_check >= 48:
+                    last_check = len(content)
+                    if _looping(content):
+                        print(f"[loop-break] cut at {len(content)} chars "
+                              f"tail={content[-40:]!r}", flush=True)
+                        finish = "stop"
+                        break
+                if LOOP_DETECT and rc:
+                    rtext += rc
+                    if len(rtext) - last_check_r >= 48:
+                        last_check_r = len(rtext)
+                        if _looping(rtext):
+                            print(f"[loop-break] cut reasoning at {len(rtext)} chars "
+                                  f"tail={rtext[-40:]!r}", flush=True)
+                            finish = "stop"
+                            break
             else:
                 terminals.append(obj)
     return content, tool, finish, terminals, meta
@@ -229,6 +289,7 @@ async def _messages_stream(request, body, headers):
     max_index = 0
     stop_reason = None
     held_md = None
+    last_check = 0
     timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=None)
     async with aiohttp.ClientSession(timeout=timeout, auto_decompress=False) as sess:
         cur = None
@@ -257,6 +318,16 @@ async def _messages_stream(request, body, headers):
                     if delta.get("type") == "text_delta":
                         text += delta.get("text", "")
                     await resp.write(_aevent(et, obj))
+                    if (LOOP_DETECT and delta.get("type") == "text_delta"
+                            and len(text) - last_check >= 48):
+                        last_check = len(text)
+                        if _looping(text):
+                            print(f"[loop-break:messages] cut at {len(text)} chars "
+                                  f"tail={text[-40:]!r}", flush=True)
+                            await resp.write(_aevent("content_block_stop",
+                                {"type": "content_block_stop", "index": max_index}))
+                            stop_reason = "end_turn"
+                            break
                 elif et == "message_delta":
                     held_md = obj
                     stop_reason = (obj.get("delta") or {}).get("stop_reason")

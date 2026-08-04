@@ -32,6 +32,11 @@ Design points that keep it safe:
   continuations can leak raw tool-call markup.
 - **No-progress guard + retry cap** stop a stubborn model from piling up colons.
 
+It also **breaks degenerate repetition loops**: when a turn's output collapses
+into the same phrase, line, or character repeated over and over, the proxy cuts
+the turn cleanly (and drops the upstream request) instead of letting it run to
+tens of KB of garbage. Controlled by `LOOP_DETECT` / `LOOP_MAX_REPEAT`.
+
 ## Run
 
 In front of an existing serve:
@@ -56,8 +61,10 @@ Point your client's base URL at `http://<host>:8012/v1`. See
 | `MAX_RETRIES` | `2` | Continuation attempts per turn |
 | `CONT_CHAT_TEMPLATE_KWARGS` | `{"thinking": false}` | Kwargs for the continuation request; set `{}` for models without a thinking template |
 | `MODEL_ALIASES` | `{}` | Optional JSON mapping an exposed model name to `{"model": ..., "chat_template_kwargs": ...}`, so clients that can't send `chat_template_kwargs` can select variants by model name |
+| `LOOP_DETECT` | `1` | Cut a turn when its output degenerates into repetition (`0` = off) |
+| `LOOP_MAX_REPEAT` | `6` | Repeats of a phrase/line/character that count as a loop |
 
-Firings are logged: `[colon-retrigger] fired retries=… finish=… tool=… tail=…`.
+Firings are logged: `[colon-retrigger] fired …`, `[loop-break] cut at … chars …`.
 
 ## Endpoints
 
