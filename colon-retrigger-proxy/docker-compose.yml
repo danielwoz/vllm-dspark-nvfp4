@@ -1,0 +1,51 @@
+# Example: a DeepSeek-V4-Flash serve with the colon-retrigger proxy in front.
+# Clients connect to the proxy on :8012; it forwards to the vLLM serve.
+#
+#   docker compose up -d --build
+#
+# To put the proxy in front of an existing serve instead, run just this image:
+#   docker run -d --network host -e UPSTREAM=http://127.0.0.1:8008 -e LISTEN_PORT=8012 \
+#     danielwoz/colon-retrigger-proxy
+services:
+  vllm:
+    image: danielwoz/vllm:dspark-nvfp4-cu132
+    container_name: vllm
+    ipc: host
+    gpus: all
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    environment:
+      MODEL: deepseek-ai/DeepSeek-V4-Flash-0731
+    command:
+      - --tensor-parallel-size=2
+      - --trust-remote-code
+      - --tokenizer-mode=deepseek_v4
+      - --kv-cache-dtype=nvfp4_ds_mla
+      - --block-size=256
+      - --attention-backend=FLASHINFER_MLA_SPARSE_DSV4
+      - --kernel-config.moe_backend=marlin
+      - --speculative-config={"method":"dspark","num_speculative_tokens":4,"draft_sample_method":"probabilistic"}
+      - --gpu-memory-utilization=0.93
+      - --max-model-len=1048576
+      - --max-num-batched-tokens=2048
+      - --reasoning-parser=deepseek_v4
+      - --tool-call-parser=deepseek_v4
+      - --enable-auto-tool-choice
+      - --host=0.0.0.0
+      - --port=8000
+
+  colon-retrigger-proxy:
+    build: .
+    image: danielwoz/colon-retrigger-proxy
+    container_name: colon-retrigger-proxy
+    depends_on: [vllm]
+    ports:
+      - "8012:8012"
+    environment:
+      UPSTREAM: http://vllm:8000
+      LISTEN_PORT: "8012"
+      MAX_RETRIES: "2"
+      # Continuation disables thinking so continue_final_message appends cleanly.
+      CONT_CHAT_TEMPLATE_KWARGS: '{"thinking": false}'
+      # Optional: expose thinking variants as model names.
+      # MODEL_ALIASES: '{"deepseekv4-nothink":{"model":"deepseekv4-flash","chat_template_kwargs":{"thinking":false,"reasoning_effort":"none"}}}'

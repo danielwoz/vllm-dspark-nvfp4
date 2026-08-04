@@ -60,6 +60,25 @@ Notes:
 - Tuned config: **spec-4 / cudagraph-capture-16 / marlin MoE** (+~11% decode vs capture-8 in our sweep).
 - `--kv-cache-dtype fp8_ds_mla` and all other base-image behavior is unchanged.
 
+## Colon-retrigger proxy (optional)
+
+DeepSeek-V4-Flash occasionally ends a turn right after a lead-in that ends in a
+colon ("Let me check the version:") instead of proceeding to the tool call it
+was about to make — the turn stops early and agent clients (opencode, Claude
+Code) simply halt. [`colon-retrigger-proxy/`](colon-retrigger-proxy/) is a tiny
+reverse proxy that detects this and continues the turn, splicing the recovered
+tokens (text and/or the tool call) back into the stream. Covers both the OpenAI
+`/v1/chat/completions` and Anthropic `/v1/messages` streaming paths.
+
+```bash
+docker run -d --network host \
+  -e UPSTREAM=http://127.0.0.1:8000 -e LISTEN_PORT=8012 \
+  danielwoz/colon-retrigger-proxy
+```
+
+Point your client's base URL at `http://<host>:8012`. See the folder's README
+for configuration.
+
 ## What's in the patch series (shipped in the image at `/opt/nvfp4/patches/`)
 
 - `01-flashinfer-cuda/` — `ModelType::DSV4_NVFP4` + KV-cache traits (360 B/token page: 448x E2M1
