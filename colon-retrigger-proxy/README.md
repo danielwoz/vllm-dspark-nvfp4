@@ -63,6 +63,7 @@ Point your client's base URL at `http://<host>:8012/v1`. See
 | `MODEL_ALIASES` | `{}` | Optional JSON mapping an exposed model name to `{"model": ..., "chat_template_kwargs": ...}`, so clients that can't send `chat_template_kwargs` can select variants by model name |
 | `LOOP_DETECT` | `1` | Cut a turn when its output degenerates into repetition (`0` = off) |
 | `LOOP_MAX_REPEAT` | `6` | Repeats of a phrase/line/character that count as a loop |
+| `HIDE_REASONING` | `0` | Drop reasoning deltas on `/v1/chat/completions` so the client shows no thinking; the model still reasons upstream (answer unchanged). `/v1/messages` is unaffected |
 
 Firings are logged: `[colon-retrigger] fired …`, `[loop-break] cut at … chars …`.
 

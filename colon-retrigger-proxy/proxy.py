@@ -44,6 +44,10 @@ CONT_KWARGS = json.loads(os.environ.get("CONT_CHAT_TEMPLATE_KWARGS", '{"thinking
 ALIASES = json.loads(os.environ.get("MODEL_ALIASES", "{}"))
 LOOP_DETECT = os.environ.get("LOOP_DETECT", "1") == "1"
 LOOP_MAX_REPEAT = int(os.environ.get("LOOP_MAX_REPEAT", "6"))
+# Drop reasoning deltas on /v1/chat/completions so the client never displays
+# them. The model still reasons upstream (answer quality unchanged) — the
+# thinking is hidden, not disabled.
+HIDE_REASONING = os.environ.get("HIDE_REASONING", "0") == "1"
 HOP_HEADERS = {"host", "content-length", "transfer-encoding", "connection"}
 
 
@@ -155,28 +159,37 @@ async def _pump(sess, body, headers, resp):
             # Forward any chunk carrying a delta payload (content, reasoning, tool,
             # or the opening role); a finish_reason riding on it is suppressed so
             # the stream stays open and the turn end is emitted once at the close.
-            if delta and (c or t or rc or delta.get("role")):
-                if fr is not None:
-                    obj["choices"][0]["finish_reason"] = None
-                await resp.write(_sse(obj))
-                if LOOP_DETECT and c and len(content) - last_check >= 48:
-                    last_check = len(content)
-                    if _looping(content):
-                        print(f"[loop-break] cut at {len(content)} chars "
-                              f"tail={content[-40:]!r}", flush=True)
-                        finish = "stop"
-                        break
-                if LOOP_DETECT and rc:
-                    rtext += rc
-                    if len(rtext) - last_check_r >= 48:
-                        last_check_r = len(rtext)
-                        if _looping(rtext):
-                            print(f"[loop-break] cut reasoning at {len(rtext)} chars "
-                                  f"tail={rtext[-40:]!r}", flush=True)
-                            finish = "stop"
-                            break
+            # With HIDE_REASONING the reasoning is dropped from the delta so the
+            # client displays nothing, while the model still reasons upstream.
+            if delta is not None:
+                if HIDE_REASONING and rc:
+                    delta.pop("reasoning", None)
+                    delta.pop("reasoning_content", None)
+                visible = bool(c or t or delta.get("role") or (rc and not HIDE_REASONING))
+                if visible:
+                    if fr is not None:
+                        obj["choices"][0]["finish_reason"] = None
+                    await resp.write(_sse(obj))
+                elif not (c or t or rc or delta.get("role")):
+                    terminals.append(obj)
             else:
                 terminals.append(obj)
+            if LOOP_DETECT and c and len(content) - last_check >= 48:
+                last_check = len(content)
+                if _looping(content):
+                    print(f"[loop-break] cut at {len(content)} chars "
+                          f"tail={content[-40:]!r}", flush=True)
+                    finish = "stop"
+                    break
+            if LOOP_DETECT and rc:
+                rtext += rc
+                if len(rtext) - last_check_r >= 48:
+                    last_check_r = len(rtext)
+                    if _looping(rtext):
+                        print(f"[loop-break] cut reasoning at {len(rtext)} chars "
+                              f"tail={rtext[-40:]!r}", flush=True)
+                        finish = "stop"
+                        break
     return content, tool, finish, terminals, meta
 
 
