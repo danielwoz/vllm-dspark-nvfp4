@@ -214,6 +214,24 @@ async def _continue_once(sess, d, content, headers):
     return (m.get("content") or ""), (m.get("tool_calls") or []), ch.get("finish_reason")
 
 
+async def _retry_once(sess, d, headers):
+    """Re-run the ORIGINAL request once with thinking OFF. Used when an agentic
+    turn stalls (finish=stop, no tool call, no visible content): the model got
+    stuck in the thinking phase without acting; a thinking-off retry produces
+    the tool call or answer directly. Returns (content, tool_calls, finish)."""
+    b = dict(d)
+    b["chat_template_kwargs"] = {"thinking": False}
+    b["stream"] = False
+    b.pop("stream_options", None)
+    async with sess.request("POST", UPSTREAM + "/v1/chat/completions",
+                            data=json.dumps(b).encode(), headers=headers) as up:
+        raw = await up.read()
+    o = json.loads(raw)
+    ch = o["choices"][0]
+    m = ch.get("message", {})
+    return (m.get("content") or ""), (m.get("tool_calls") or []), ch.get("finish_reason")
+
+
 async def _chat_stream(request, body, headers):
     d = json.loads(body)
     out_headers = {"Content-Type": "text/event-stream; charset=utf-8",
@@ -249,10 +267,33 @@ async def _chat_stream(request, body, headers):
             # more colons/whitespace) so a stubborn stop can't pile up colons.
             if not c2.strip(" :\n\t"):
                 break
+        if retries:
+            print(f"[colon-retrigger] fired retries={retries} finish={finish} "
+                  f"tool={tool} tail={content[-40:]!r}", flush=True)
+
+        # Empty-stall safety net: an agentic turn ended with no tool call and no
+        # visible content (the model planned in hidden reasoning, then stopped).
+        # Retry once with thinking off so it acts directly.
+        if (has_tools and meta and finish == "stop" and not tool
+                and not content.strip() and not from_cont):
+            from_cont = True
+            c2, tc2, f2 = await _retry_once(sess, d, headers)
+            if c2:
+                await resp.write(_sse(_chunk(meta, {"content": c2})))
+                content += c2
+            if tc2:
+                for i, tc in enumerate(tc2):
+                    delta = {"tool_calls": [{"index": i, "id": tc.get("id"),
+                             "type": "function", "function": tc.get("function", {})}]}
+                    await resp.write(_sse(_chunk(meta, delta)))
+                tool = True
+                finish = "tool_calls"
+            else:
+                finish = f2 or finish
+            print(f"[stall-retry] empty agentic turn -> thinking-off retry: "
+                  f"tool={tool} finish={finish} chars={len(content)}", flush=True)
 
     if from_cont:
-        print(f"[colon-retrigger] fired retries={retries} finish={finish} "
-              f"tool={tool} tail={content[-40:]!r}", flush=True)
         await resp.write(_sse(_chunk(meta, {}, "tool_calls" if tool else (finish or "stop"))))
     elif terminals:
         for tobj in terminals:

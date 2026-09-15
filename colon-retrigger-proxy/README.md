@@ -37,6 +37,11 @@ into the same phrase, line, or character repeated over and over, the proxy cuts
 the turn cleanly (and drops the upstream request) instead of letting it run to
 tens of KB of garbage. Controlled by `LOOP_DETECT` / `LOOP_MAX_REPEAT`.
 
+And it **recovers empty stalls**: when a tool-bearing (agentic) turn ends with
+`finish=stop`, no tool call, and no visible content — the model planned in
+hidden reasoning then stopped without acting — the proxy retries once with
+thinking off so it acts directly (`/v1/chat/completions` path).
+
 ## Run
 
 In front of an existing serve:
